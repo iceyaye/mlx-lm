@@ -300,16 +300,21 @@ def maybe_quantize_kv_cache(prompt_cache, quantized_kv_start, kv_group_size, kv_
             prompt_cache[e] = c.to_quantized(group_size=kv_group_size, bits=kv_bits)
 
 
-def make_turboquant_cache(model, bits=3, fp16_layers=1):
+def make_turboquant_cache(model, bits=3, fp16_layers=1, mode="mse",
+                          qjl_mode="gaussian", outlier_config=None):
     """Create layer-adaptive TurboQuant cache.
 
     First and last ``fp16_layers`` layers use standard FP16 KVCache.
-    Middle layers use TurboQuantKVCache with ``bits``-bit compression.
+    Middle layers use TurboQuantKVCache (or OutlierSplitKVCache) with compression.
 
     Args:
         model: The model to create caches for.
-        bits (int): Quantization bits (1-4). Default: ``3`` (4.6x compression).
+        bits (int): Quantization bits (1-4). Default: ``3``.
         fp16_layers (int): Number of first/last layers to keep in FP16. Default: ``1``.
+        mode (str): 'mse' (Algorithm 1) or 'prod' (Algorithm 2, unbiased). Default: ``'mse'``.
+        qjl_mode (str): 'gaussian' or 'hadamard'. Only for mode='prod'. Default: ``'gaussian'``.
+        outlier_config (dict, optional): If set, use OutlierSplitKVCache with keys:
+            bits_outlier, bits_regular, n_outlier. Overrides ``bits``.
 
     Returns:
         List of cache objects (one per layer).
@@ -332,8 +337,16 @@ def make_turboquant_cache(model, bits=3, fp16_layers=1):
     for i in range(num_layers):
         if i < fp16_layers or i >= num_layers - fp16_layers:
             caches.append(cache.KVCache())
+        elif outlier_config is not None:
+            from mlx_lm.models.turboquant_outlier import OutlierSplitKVCache
+            caches.append(OutlierSplitKVCache(
+                bits_outlier=outlier_config.get("bits_outlier", 3),
+                bits_regular=outlier_config.get("bits_regular", 2),
+                n_outlier=outlier_config.get("n_outlier", 32),
+                mode=mode, qjl_mode=qjl_mode,
+            ))
         else:
-            caches.append(TurboQuantKVCache(bits=bits))
+            caches.append(TurboQuantKVCache(bits=bits, mode=mode, qjl_mode=qjl_mode))
     return caches
 
 
@@ -352,6 +365,9 @@ def generate_step(
     quantized_kv_start: int = 0,
     turbo_kv_bits: Optional[int] = None,
     turbo_fp16_layers: int = 1,
+    turbo_mode: str = "mse",
+    turbo_qjl_mode: str = "gaussian",
+    turbo_outlier_config: Optional[dict] = None,
     prompt_progress_callback: Optional[Callable[[int, int], None]] = None,
     input_embeddings: Optional[mx.array] = None,
 ) -> Generator[Tuple[mx.array, mx.array], None, None]:
@@ -379,10 +395,15 @@ def generate_step(
         quantized_kv_start (int): Step to begin using a quantized KV cache.
            when ``kv_bits`` is non-None. Default: ``0``.
         turbo_kv_bits (int, optional): TurboQuant KV cache compression bits (1-4).
-          Uses PolarQuant with Hadamard rotation. 3-bit gives 4.6x compression.
           None implies no TurboQuant. Default: ``None``.
         turbo_fp16_layers (int): Number of first/last layers to keep in FP16 when
           using TurboQuant. Default: ``1``.
+        turbo_mode (str): 'mse' (Algorithm 1) or 'prod' (Algorithm 2, unbiased
+          inner products via QJL residual). Default: ``'mse'``.
+        turbo_qjl_mode (str): 'gaussian' (paper-faithful) or 'hadamard' (faster).
+          Only used when turbo_mode='prod'. Default: ``'gaussian'``.
+        turbo_outlier_config (dict, optional): Outlier channel splitting config with
+          keys: bits_outlier, bits_regular, n_outlier. Default: ``None``.
         prompt_progress_callback (Callable[[int, int], None]): A call-back which takes the
            prompt tokens processed so far and the total number of prompt tokens.
         input_embeddings (mx.array, optional): Input embeddings to use instead of or in
@@ -412,6 +433,8 @@ def generate_step(
         if turbo_kv_bits is not None:
             prompt_cache = make_turboquant_cache(
                 model, bits=turbo_kv_bits, fp16_layers=turbo_fp16_layers,
+                mode=turbo_mode, qjl_mode=turbo_qjl_mode,
+                outlier_config=turbo_outlier_config,
             )
         else:
             prompt_cache = cache.make_prompt_cache(

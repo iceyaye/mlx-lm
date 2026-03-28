@@ -78,3 +78,45 @@ def inverse_randomized_hadamard(x: mx.array, signs: mx.array) -> mx.array:
         (..., d) inverse-rotated array
     """
     return walsh_hadamard_transform(x) * signs
+
+
+def generate_qjl_matrix(d: int, seed: int, mode: str = "gaussian") -> mx.array:
+    """Generate QJL projection matrix for Algorithm 2.
+
+    Args:
+        d: dimension
+        seed: random seed
+        mode: 'gaussian' for dense d x d Gaussian matrix (paper-faithful),
+              'hadamard' for d-element sign vector (faster, approximate)
+
+    Returns:
+        (d, d) float32 for gaussian, (d,) float32 for hadamard
+    """
+    key = mx.random.key(seed)
+    if mode == "gaussian":
+        return mx.random.normal(shape=(d, d), key=key).astype(mx.float32)
+    elif mode == "hadamard":
+        return random_diagonal_sign(d, seed=seed)
+    else:
+        raise ValueError(f"Unknown QJL mode: {mode}. Use 'gaussian' or 'hadamard'.")
+
+
+def qjl_reconstruction_constant(d: int, mode: str = "gaussian") -> float:
+    """QJL dequantization scaling constant.
+
+    For Gaussian S: sqrt(pi/2) / d — from paper Definition 1.
+    For Hadamard S: sqrt(pi/(2*d)) — adjusted for Hadamard variance ||r||^2/d.
+
+    Args:
+        d: dimension
+        mode: 'gaussian' or 'hadamard'
+
+    Returns:
+        Scalar reconstruction constant.
+    """
+    if mode == "gaussian":
+        return math.sqrt(math.pi / 2.0) / d
+    elif mode == "hadamard":
+        return math.sqrt(math.pi / (2.0 * d))
+    else:
+        raise ValueError(f"Unknown QJL mode: {mode}")

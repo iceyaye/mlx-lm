@@ -80,9 +80,6 @@ def unpack_indices(packed: mx.array, bits: int, dim: int) -> mx.array:
         values.append((flat >> (i * bits)) & mask)
 
     # Stack and trim to original dim
-    result = mx.concatenate(values, axis=-1)  # wrong order, need interleave
-    # Actually: values[i] has shape (n_vecs, p_dim) = the i-th value from each word
-    # We need to reshape to (n_vecs, p_dim * vpw) then trim
     result = mx.stack(values, axis=-1)  # (n_vecs, p_dim, vpw)
     result = result.reshape(n_vecs, p_dim * vpw)[:, :dim]
 
